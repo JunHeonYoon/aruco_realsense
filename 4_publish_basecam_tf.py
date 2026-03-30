@@ -5,9 +5,10 @@ the transform stored in yaml.
 import argparse
 import yaml
 import numpy as np
-import rospy
+import rclpy
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
+from rclpy.node import Node
 from math import atan2, asin, sqrt
 
 def rotmat_to_quat(R):
@@ -66,19 +67,31 @@ def main():
     args = ap.parse_args()
 
     trans, quat = load_yaml_transform(args.yaml)
+    trans = [float(v) for v in trans]
+    quat = [float(v) for v in quat]
 
-    rospy.init_node('handeye_tf_broadcaster', anonymous=True)
-    br = tf2_ros.StaticTransformBroadcaster()
+    rclpy.init(args=None)
+    node = Node('basecam_tf_broadcaster')
+    br = tf2_ros.StaticTransformBroadcaster(node)
     tfm = TransformStamped()
-    tfm.header.stamp    = rospy.Time.now()
+    tfm.header.stamp = node.get_clock().now().to_msg()
     tfm.header.frame_id = args.parent_frame
     tfm.child_frame_id  = args.child_frame
-    tfm.transform.translation.x, tfm.transform.translation.y, tfm.transform.translation.z = trans
-    tfm.transform.rotation.x,    tfm.transform.rotation.y,    tfm.transform.rotation.z, tfm.transform.rotation.w = quat
+    tfm.transform.translation.x = trans[0]
+    tfm.transform.translation.y = trans[1]
+    tfm.transform.translation.z = trans[2]
+    tfm.transform.rotation.x = quat[0]
+    tfm.transform.rotation.y = quat[1]
+    tfm.transform.rotation.z = quat[2]
+    tfm.transform.rotation.w = quat[3]
     br.sendTransform(tfm)
 
-    rospy.loginfo(f"Static TF {args.parent_frame} → {args.child_frame} published.")
-    rospy.spin()
+    node.get_logger().info(f"Static TF {args.parent_frame} -> {args.child_frame} published.")
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

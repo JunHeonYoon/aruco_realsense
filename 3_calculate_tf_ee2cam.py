@@ -9,11 +9,14 @@ import argparse
 import yaml
 import sys
 import numpy as np
+import os
 import cv2
 import pyrealsense2 as rs
-import rospy
+import rclpy
 from geometry_msgs.msg import PoseStamped, TransformStamped
 import tf2_ros
+from rclpy.duration import Duration
+from rclpy.node import Node
 from numpy.linalg import inv
 from scipy.linalg import sqrtm
 from math import atan2, asin
@@ -52,6 +55,41 @@ def load_yaml_intrinsics(path):
         d = yaml.safe_load(f)
     return np.array(d['camera_matrix'], dtype=np.float32), \
            np.array(d['dist_coeff'],    dtype=np.float32)
+
+
+def list_realsense_devices():
+    """Return connected RealSense devices with serial and name."""
+    ctx = rs.context()
+    devices = []
+    for dev in ctx.query_devices():
+        devices.append({
+            'serial': dev.get_info(rs.camera_info.serial_number),
+            'name': dev.get_info(rs.camera_info.name),
+        })
+    return devices
+
+
+def select_realsense_device(requested_serial):
+    """Pick the requested RealSense serial or fall back to the first device."""
+    devices = list_realsense_devices()
+    if not devices:
+        raise RuntimeError("No RealSense devices found.")
+
+    if requested_serial in (None, "", "none", "None"):
+        device = devices[0]
+        print(f"Using first RealSense: {device['name']} [{device['serial']}]")
+        return device
+
+    for device in devices:
+        if device['serial'] == requested_serial:
+            print(f"Using requested RealSense: {device['name']} [{device['serial']}]")
+            return device
+
+    available = ", ".join(d['serial'] for d in devices)
+    raise RuntimeError(
+        f"Requested RealSense serial '{requested_serial}' was not found. "
+        f"Available serials: {available}"
+    )
 
 
 def rot_to_quat(R):
@@ -146,34 +184,40 @@ class TFCollector:
     def __init__(self, cfg):
         self.cfg = cfg
 
+        # ROS 2
+        rclpy.init(args=None)
+        self.node = Node('tf_collector_node')
+        self.tf_buf = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buf, self.node)
+        self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self.node)
+        self.tf_pub = self.node.create_publisher(
+            TransformStamped, 'calibrated_tf', 10)
+        self.pose_pub = self.node.create_publisher(PoseStamped, 'cam_pose', 10)
+
         # RealSense
+        self.device = select_realsense_device(cfg.camera_serial)
         self.pipeline = rs.pipeline()
         rs_cfg = rs.config()
+        rs_cfg.enable_device(self.device['serial'])
         rs_cfg.enable_stream(rs.stream.color, cfg.width, cfg.height,
-                             rs.format.rgb8, cfg.fps)
+                             rs.format.bgr8, cfg.fps)
         self.pipeline.start(rs_cfg)
+        print(f"Started RealSense stream from [{self.device['serial']}]")
 
         # Intrinsics
-        if cfg.intrinsics:
+        if cfg.intrinsics and os.path.isfile(cfg.intrinsics):
             self.K, self.dist = load_yaml_intrinsics(cfg.intrinsics)
             print(f"Loaded intrinsics from {cfg.intrinsics}")
         else:
             self.K = self.dist = None
-            print("Intrinsics will be fetched from RealSense at runtime.")
+            if cfg.intrinsics:
+                print(f"Intrinsics file not found: {cfg.intrinsics}")
+            print("Using RealSense default intrinsics from the camera.")
 
         # ArUco
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(
             getattr(cv2.aruco, 'DICT_' + cfg.dictionary))
         self.aruco_param = cv2.aruco.DetectorParameters()
-
-        # ROS
-        rospy.init_node('tf_collector_node', anonymous=True)
-        self.tf_buf = tf2_ros.Buffer()
-        tf2_ros.TransformListener(self.tf_buf)
-        self.tf_pub  = rospy.Publisher('calibrated_tf',
-                                       TransformStamped, queue_size=1)
-        self.pose_pub = rospy.Publisher('cam_pose',
-                                        PoseStamped, queue_size=1)
 
         # Sample buffers
         self.list_tf_base2ee = []
@@ -213,10 +257,13 @@ class TFCollector:
 
     def get_base2ee(self):
         try:
-            tf = self.tf_buf.lookup_transform(self.cfg.base_frame,
-                                              self.cfg.ee_frame,
-                                              rospy.Time(0))
-            return self.tf_to_mat(tf)
+            tfm = self.tf_buf.lookup_transform(
+                self.cfg.base_frame,
+                self.cfg.ee_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.2)
+            )
+            return self.tf_to_mat(tfm)
         except Exception:
             return None
 
@@ -240,11 +287,14 @@ class TFCollector:
     # Main loop
     # --------------------------
     def run(self):
-        while not rospy.is_shutdown():
+        while rclpy.ok():
+            rclpy.spin_once(self.node, timeout_sec=0.01)
             base2ee = self.get_base2ee()
 
             frame = self.pipeline.wait_for_frames().get_color_frame()
-            img = cv2.cvtColor(np.asanyarray(frame.get_data()), cv2.COLOR_RGB2BGR)
+            if not frame:
+                continue
+            img = np.asanyarray(frame.get_data()).copy()
 
             cam2qr = self.get_cam2qr(img)
 
@@ -297,32 +347,38 @@ class TFCollector:
                     B_list.append(B)
                 R, t = solve_AX_XB(A_list, B_list)
                 X = np.eye(4); X[:3, :3] = R.real; X[:3, 3] = t.flatten()
+                t_xyz = [float(v) for v in X[:3, 3]]
 
                 # Compose YAML
                 data = {
                     'rotation_matrix': X[:3, :3].tolist(),
                     'quaternion':      rot_to_quat(X[:3, :3]),
                     'euler_zyx':       rot_to_euler_zyx(X[:3, :3]),
-                    'translation':     X[:3, 3].tolist()
+                    'translation':     t_xyz
                 }
                 with open(self.cfg.output, 'w') as f:
                     yaml.dump(data, f)
                 print(f"Saved calibration to {self.cfg.output}")
 
-                # Publish TF
+                # Publish TF and pose through ROS 2
                 tfm = TransformStamped()
-                tfm.header.stamp    = rospy.Time.now()
+                tfm.header.stamp = self.node.get_clock().now().to_msg()
                 tfm.header.frame_id = self.cfg.calib_frame
                 tfm.child_frame_id  = self.cfg.cam_frame
-                tfm.transform.translation.x, tfm.transform.translation.y, tfm.transform.translation.z = t
+                tfm.transform.translation.x = t_xyz[0]
+                tfm.transform.translation.y = t_xyz[1]
+                tfm.transform.translation.z = t_xyz[2]
                 q = data['quaternion']
                 tfm.transform.rotation.x, tfm.transform.rotation.y, tfm.transform.rotation.z, tfm.transform.rotation.w = q
                 self.tf_pub.publish(tfm)
+                self.tf_broadcaster.sendTransform(tfm)
 
                 # PoseStamped
                 pose = PoseStamped()
                 pose.header = tfm.header
-                pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = t
+                pose.pose.position.x = t_xyz[0]
+                pose.pose.position.y = t_xyz[1]
+                pose.pose.position.z = t_xyz[2]
                 pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = q
                 self.pose_pub.publish(pose)
                 print("Calibration published.")
@@ -331,7 +387,8 @@ class TFCollector:
 
         self.pipeline.stop()
         cv2.destroyAllWindows()
-        rospy.signal_shutdown("User quit.")
+        self.node.destroy_node()
+        rclpy.shutdown()
 
 
 # ------------------------------------------------
@@ -343,8 +400,10 @@ def parse_args():
     p.add_argument('--width', type=int, default=1280)
     p.add_argument('--height', type=int, default=720)
     p.add_argument('--fps', type=int, default=30)
-    p.add_argument('--base-frame', default='panda_link0')
-    p.add_argument('--ee-frame',   default='panda_hand')
+    p.add_argument('--camera-serial', default=None,
+                   help='RealSense serial number to use. If omitted or "none", use the first detected camera.')
+    p.add_argument('--base-frame', default='right_fr3_link0')
+    p.add_argument('--ee-frame',   default='right_fr3_hand')
     p.add_argument('--cam-frame',  default='camera')
     p.add_argument('--calib-frame', default='camera_calibrated')
     p.add_argument('--marker-length', type=float, default=0.04)
@@ -359,3 +418,8 @@ def parse_args():
 if __name__ == '__main__':
     cfg = parse_args()
     TFCollector(cfg).run()
+
+'''
+You can get ID of the connected realsense cameras by:
+rs-enumerate-devices
+'''
