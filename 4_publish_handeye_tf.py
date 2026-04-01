@@ -65,7 +65,7 @@ def main():
     ap = argparse.ArgumentParser(description="Publish hand-eye TF from YAML")
     ap.add_argument('--yaml',         default='TF_ee2cam.yaml')
     ap.add_argument('--parent-frame', default='panda_hand')
-    ap.add_argument('--child-frame',  default='rs_camera')
+    ap.add_argument('--child-frame',  default='azure_kinect_camera')
     args = ap.parse_args()
 
     trans, quat = load_yaml_transform(args.yaml)

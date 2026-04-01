@@ -1,5 +1,5 @@
 """
-Hand-Eye TF Collector with RealSense & ArUco
+Hand-Eye TF Collector with Azure Kinect & ArUco
     s : sample TF pair
     c : calibrate + save YAML
     q : quit
@@ -11,7 +11,6 @@ import sys
 import os
 import numpy as np
 import cv2
-import pyrealsense2 as rs
 import rclpy
 from geometry_msgs.msg import PoseStamped, TransformStamped
 import tf2_ros
@@ -20,6 +19,13 @@ from rclpy.node import Node
 from numpy.linalg import inv
 from scipy.linalg import sqrtm
 from math import atan2, asin
+
+from azure_kinect_camera import (
+    get_bgr_frame,
+    get_camera_intrinsics,
+    select_azure_kinect_device,
+    start_azure_kinect,
+)
 
 
 # ------------------------------------------------
@@ -55,41 +61,6 @@ def load_yaml_intrinsics(path):
         d = yaml.safe_load(f)
     return np.array(d['camera_matrix'], dtype=np.float32), \
            np.array(d['dist_coeff'],    dtype=np.float32)
-
-
-def list_realsense_devices():
-    """Return connected RealSense devices with serial and name."""
-    ctx = rs.context()
-    devices = []
-    for dev in ctx.query_devices():
-        devices.append({
-            'serial': dev.get_info(rs.camera_info.serial_number),
-            'name': dev.get_info(rs.camera_info.name),
-        })
-    return devices
-
-
-def select_realsense_device(requested_serial):
-    """Pick the requested RealSense serial or fall back to the first device."""
-    devices = list_realsense_devices()
-    if not devices:
-        raise RuntimeError("No RealSense devices found.")
-
-    if requested_serial in (None, "", "none", "None"):
-        device = devices[0]
-        print(f"Using first RealSense: {device['name']} [{device['serial']}]")
-        return device
-
-    for device in devices:
-        if device['serial'] == requested_serial:
-            print(f"Using requested RealSense: {device['name']} [{device['serial']}]")
-            return device
-
-    available = ", ".join(d['serial'] for d in devices)
-    raise RuntimeError(
-        f"Requested RealSense serial '{requested_serial}' was not found. "
-        f"Available serials: {available}"
-    )
 
 
 def rot_to_quat(R):
@@ -194,15 +165,10 @@ class TFCollector:
             TransformStamped, 'calibrated_tf', 10)
         self.pose_pub = self.node.create_publisher(PoseStamped, 'cam_pose', 10)
 
-        # RealSense
-        self.device = select_realsense_device(cfg.camera_serial)
-        self.pipeline = rs.pipeline()
-        rs_cfg = rs.config()
-        rs_cfg.enable_device(self.device['serial'])
-        rs_cfg.enable_stream(rs.stream.color, cfg.width, cfg.height,
-                             rs.format.bgr8, cfg.fps)
-        self.pipeline.start(rs_cfg)
-        print(f"Started RealSense stream from [{self.device['serial']}]")
+        # Azure Kinect
+        self.device = select_azure_kinect_device(cfg.camera_serial)
+        self.camera = start_azure_kinect(self.device['device_id'], cfg.width, cfg.height, cfg.fps)
+        print(f"Started Azure Kinect stream from [{self.device['serial']}]")
 
         # Intrinsics
         if cfg.intrinsics and os.path.isfile(cfg.intrinsics):
@@ -212,7 +178,7 @@ class TFCollector:
             self.K = self.dist = None
             if cfg.intrinsics:
                 print(f"Intrinsics file not found: {cfg.intrinsics}")
-            print("Using RealSense default intrinsics from the camera.")
+            print("Using Azure Kinect factory intrinsics from the camera.")
 
         # ArUco
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(
@@ -234,14 +200,8 @@ class TFCollector:
     def get_intrinsics_if_needed(self):
         if self.K is not None:
             return
-        prof = self.pipeline.get_active_profile()
-        intr = prof.get_stream(rs.stream.color
-                ).as_video_stream_profile().get_intrinsics()
-        self.K = np.array([[intr.fx, 0, intr.ppx],
-                           [0, intr.fy, intr.ppy],
-                           [0, 0, 1]], dtype=np.float32)
-        self.dist = np.array(intr.coeffs[:5], dtype=np.float32)
-        print("Fetched intrinsics from RealSense.")
+        self.K, self.dist = get_camera_intrinsics(self.camera)
+        print("Fetched intrinsics from Azure Kinect.")
 
     def tf_to_mat(self, tf_msg):
         T = np.eye(4)
@@ -291,10 +251,9 @@ class TFCollector:
             rclpy.spin_once(self.node, timeout_sec=0.01)
             base2ee = self.get_base2ee()
 
-            frame = self.pipeline.wait_for_frames().get_color_frame()
-            if not frame:
+            img = get_bgr_frame(self.camera)
+            if img is None:
                 continue
-            img = np.asanyarray(frame.get_data()).copy()
 
             cam2qr = self.get_cam2qr(img)
 
@@ -385,7 +344,7 @@ class TFCollector:
             elif key == ord('q'):
                 break
 
-        self.pipeline.stop()
+        self.camera.stop()
         cv2.destroyAllWindows()
         self.node.destroy_node()
         rclpy.shutdown()
@@ -395,15 +354,15 @@ class TFCollector:
 # CLI
 # ------------------------------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="RealSense ArUco Hand-Eye Collector")
-    p.add_argument('--intrinsics', default="camIntrinsic.yaml", help='YAML with camera_matrix & dist_coeff')
+    p = argparse.ArgumentParser(description="Azure Kinect ArUco Hand-Eye Collector")
+    p.add_argument('--intrinsics', default=None, help='Optional YAML with camera_matrix & dist_coeff')
     p.add_argument('--width', type=int, default=1280)
     p.add_argument('--height', type=int, default=720)
     p.add_argument('--fps', type=int, default=30)
     p.add_argument('--camera-serial', default=None,
-                   help='RealSense serial number to use. If omitted or "none", use the first detected camera.')
-    p.add_argument('--base-frame', default='panda_link0')
-    p.add_argument('--ee-frame',   default='panda_hand')
+                   help='Azure Kinect serial number to use. If omitted or "none", use the first detected camera.')
+    p.add_argument('--base-frame', default='mobile_base')
+    p.add_argument('--ee-frame',   default='right_fr3_hand')
     p.add_argument('--cam-frame',  default='camera')
     p.add_argument('--calib-frame', default='camera_calibrated')
     p.add_argument('--marker-length', type=float, default=0.04)
