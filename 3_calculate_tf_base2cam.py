@@ -396,7 +396,7 @@ class TFCollector:
 # ------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="RealSense ArUco Hand-Eye Collector")
-    p.add_argument('--intrinsics', default="camIntrinsic.yaml", help='YAML with camera_matrix & dist_coeff')
+    p.add_argument('--intrinsics', default=None, help='YAML with camera_matrix & dist_coeff')
     p.add_argument('--width', type=int, default=1280)
     p.add_argument('--height', type=int, default=720)
     p.add_argument('--fps', type=int, default=30)
