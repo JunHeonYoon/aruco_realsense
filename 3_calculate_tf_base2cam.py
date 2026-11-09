@@ -183,7 +183,7 @@ class TFCollector:
         # ArUco
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(
             getattr(cv2.aruco, 'DICT_' + cfg.dictionary))
-        self.aruco_param = cv2.aruco.DetectorParameters()
+        self.aruco_param = cv2.aruco.DetectorParameters_create()
 
         # Sample buffers
         self.list_tf_base2ee = []
@@ -361,11 +361,11 @@ def parse_args():
     p.add_argument('--fps', type=int, default=30)
     p.add_argument('--camera-serial', default=None,
                    help='Azure Kinect serial number to use. If omitted or "none", use the first detected camera.')
-    p.add_argument('--base-frame', default='mobile_base')
-    p.add_argument('--ee-frame',   default='right_fr3_hand')
+    p.add_argument('--base-frame', default='base_link')
+    p.add_argument('--ee-frame',   default='left_fr3_link8')
     p.add_argument('--cam-frame',  default='camera')
     p.add_argument('--calib-frame', default='camera_calibrated')
-    p.add_argument('--marker-length', type=float, default=0.04)
+    p.add_argument('--marker-length', type=float, default=0.08)
     p.add_argument('--dictionary',
                    choices=['4X4_50', '5X5_100', '6X6_250', '7X7_1000'],
                    default='6X6_250')

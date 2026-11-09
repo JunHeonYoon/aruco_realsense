@@ -20,7 +20,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation
 
-from azure_kinect_camera import get_bgr_frame, get_camera_intrinsics, start_azure_kinect
+from azure_kinect_camera import add_exposure_args, get_bgr_frame, get_camera_intrinsics, start_azure_kinect
 
 
 def load_intrinsics(path):
@@ -81,6 +81,9 @@ class QRPublisher(Node):
             width=args.width,
             height=args.height,
             fps=args.fps,
+            exposure=args.exposure,
+            gain=args.gain,
+            powerline_hz=args.powerline,
         )
 
         if args.intrinsics:
@@ -91,7 +94,7 @@ class QRPublisher(Node):
             self.dist = None
 
         self.dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, "DICT_" + args.dictionary))
-        self.par = cv2.aruco.DetectorParameters()
+        self.par = cv2.aruco.DetectorParameters_create()
         self.mlen = args.marker_length
 
         self.base = args.base_frame
@@ -194,13 +197,13 @@ def main():
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--marker-length", type=float, default=0.04)
+    ap.add_argument("--marker-length", type=float, default=0.08)
     ap.add_argument(
         "--dictionary",
         choices=["4X4_50", "5X5_100", "6X6_250", "7X7_1000"],
         default="6X6_250",
     )
-    ap.add_argument("--base-frame", default="panda_hand")
+    ap.add_argument("--base-frame", default="base_link")
     ap.add_argument("--cam-frame", default="azure_kinect_camera")
     ap.add_argument("--qr-frame", default="object_frame")
     ap.add_argument(
@@ -209,6 +212,7 @@ def main():
         default=10,
         help="Window size for moving-average filter",
     )
+    add_exposure_args(ap)
     ap.add_argument("--no-display", action="store_true")
     args = ap.parse_args()
 

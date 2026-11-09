@@ -71,7 +71,36 @@ def select_azure_kinect_device(requested_serial):
     )
 
 
-def start_azure_kinect(device_id, width, height, fps):
+def add_exposure_args(parser, default_exposure=2500):
+    parser.add_argument(
+        "--exposure",
+        type=int,
+        default=default_exposure,
+        help="Color exposure in microseconds (0 = auto). Lower reduces motion blur",
+    )
+    parser.add_argument(
+        "--gain",
+        type=int,
+        default=192,
+        help="Color gain (0-255); short exposure needs high gain. Unset keeps the "
+             "device's last value, which persists across runs",
+    )
+    parser.add_argument(
+        "--powerline",
+        type=int,
+        choices=[50, 60],
+        default=60,
+        help="Mains frequency for anti-flicker (Korea: 60)",
+    )
+
+
+def start_azure_kinect(device_id, width, height, fps, exposure=0, gain=None, powerline_hz=60,
+                       depth_mode=None):
+    """
+    exposure is in microseconds; 0 keeps auto exposure.
+    depth_mode: None (color only) or a DepthMode name, e.g. "NFOV_UNBINNED";
+    with depth, only synchronized color+depth captures are delivered.
+    """
     resolution = AZURE_KINECT_RESOLUTION_MAP.get((width, height))
     fps_enum = AZURE_KINECT_FPS_MAP.get(fps)
     if resolution is None:
@@ -86,12 +115,26 @@ def start_azure_kinect(device_id, width, height, fps):
         config=K4AConfig(
             color_resolution=resolution,
             camera_fps=fps_enum,
-            depth_mode=DepthMode.OFF,
-            synchronized_images_only=False,
+            depth_mode=getattr(DepthMode, depth_mode) if depth_mode else DepthMode.OFF,
+            synchronized_images_only=bool(depth_mode),
         ),
         device_id=device_id,
     )
     camera.start()
+
+    # Short manual exposure reduces motion blur on moving markers.
+    camera.powerline_frequency = 1 if powerline_hz == 50 else 2
+    if exposure > 0:
+        camera.exposure_mode_auto = False
+        camera.exposure = exposure
+    else:
+        camera.exposure_mode_auto = True
+    if gain is not None:
+        camera.gain = gain
+    print(
+        f"Azure Kinect #{device_id}: exposure="
+        f"{'auto' if camera.exposure_mode_auto else camera.exposure} us, gain={camera.gain}"
+    )
     return camera
 
 

@@ -164,8 +164,11 @@ def init_realsense(serial, width, height, fps):
     return pipeline
 
 
-def init_azure_kinect(device_id, width, height, fps):
-    """Initialize and start an Azure Kinect color-only stream for one device."""
+def init_azure_kinect(device_id, width, height, fps, exposure=0, gain=None, powerline_hz=60):
+    """
+    Initialize and start an Azure Kinect color-only stream for one device.
+    exposure is in microseconds; 0 keeps auto exposure.
+    """
     resolution = AZURE_KINECT_RESOLUTION_MAP.get((width, height))
     fps_enum = AZURE_KINECT_FPS_MAP.get(fps)
     if resolution is None:
@@ -187,6 +190,20 @@ def init_azure_kinect(device_id, width, height, fps):
         device_id=device_id,
     )
     camera.start()
+
+    # Short manual exposure reduces motion blur on moving markers.
+    camera.powerline_frequency = 1 if powerline_hz == 50 else 2
+    if exposure > 0:
+        camera.exposure_mode_auto = False
+        camera.exposure = exposure
+    else:
+        camera.exposure_mode_auto = True
+    if gain is not None:
+        camera.gain = gain
+    print(
+        f"Azure Kinect #{device_id}: exposure="
+        f"{'auto' if camera.exposure_mode_auto else camera.exposure} us, gain={camera.gain}"
+    )
     return camera
 
 
@@ -343,7 +360,15 @@ def build_camera_states(args):
     camera_states = []
     for device in devices:
         if args.backend == "azure_kinect":
-            camera = init_azure_kinect(device["device_id"], args.width, args.height, args.fps)
+            camera = init_azure_kinect(
+                device["device_id"],
+                args.width,
+                args.height,
+                args.fps,
+                exposure=args.exposure,
+                gain=args.gain,
+                powerline_hz=args.powerline,
+            )
             calib_path = resolve_calibration_path(args.calib, device["serial"])
             camera_matrix, dist_coeffs = load_azure_kinect_calibration(calib_path, camera)
         else:
@@ -414,6 +439,26 @@ def main():
         default="6X6_250",
         help="Predefined ArUco dictionary",
     )
+    parser.add_argument(
+        "--exposure",
+        type=int,
+        default=2500,
+        help="Azure Kinect color exposure in microseconds (0 = auto). Lower reduces motion blur",
+    )
+    parser.add_argument(
+        "--gain",
+        type=int,
+        default=192,
+        help="Azure Kinect color gain (0-255); short exposure needs high gain. Unset keeps the "
+             "device's last value, which persists across runs",
+    )
+    parser.add_argument(
+        "--powerline",
+        type=int,
+        choices=[50, 60],
+        default=60,
+        help="Mains frequency for anti-flicker (Korea: 60)",
+    )
     parser.add_argument("--no-display", action="store_true", help="Disable OpenCV window")
     parser.add_argument("--output", type=str, help="Save poses to .json or .csv")
     args = parser.parse_args()
@@ -421,7 +466,7 @@ def main():
     require_backend(args.backend)
 
     aruco_dict = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, "DICT_" + args.dictionary))
-    aruco_params = cv2.aruco.DetectorParameters()
+    aruco_params = cv2.aruco.DetectorParameters_create()
     camera_states = build_camera_states(args)
 
     print(f"Started {len(camera_states)} {args.backend} camera(s):")

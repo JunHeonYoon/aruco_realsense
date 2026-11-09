@@ -62,7 +62,7 @@ def load_yaml_transform(path):
 def main():
     ap = argparse.ArgumentParser(description="Publish baese cam TF from YAML")
     ap.add_argument('--yaml',         default='TF_base2cam.yaml')
-    ap.add_argument('--parent-frame', default='panda_link0')
+    ap.add_argument('--parent-frame', default='base_link')
     ap.add_argument('--child-frame',  default='azure_kinect_camera')
     args = ap.parse_args()
 
